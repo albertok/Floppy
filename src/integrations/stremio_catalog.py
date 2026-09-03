@@ -4,7 +4,9 @@ import re
 from dataclasses import dataclass
 from urllib.parse import parse_qsl, unquote
 
-from app.models import MediaTypes, Sources
+from django.db.models import F
+
+from app.models import MediaTypes, Season, Sources
 from lists.models import CustomList, CustomListItem
 
 PAGE_SIZE = 100
@@ -128,6 +130,62 @@ def local_imdb_id(item):
     return None
 
 
+def _project_item_metas(items, stremio_type, skip):
+    """Return one page of Stremio metas for already-ordered items."""
+    metas = []
+    publishable_seen = 0
+    unresolved_count = 0
+    for item in items:
+        imdb_id = local_imdb_id(item)
+        if imdb_id is None:
+            unresolved_count += 1
+            continue
+
+        if publishable_seen < skip:
+            publishable_seen += 1
+            continue
+
+        meta = {"id": imdb_id, "type": stremio_type, "name": item.title}
+        if item.image:
+            meta["poster"] = item.image
+        metas.append(meta)
+        if len(metas) == PAGE_SIZE:
+            break
+
+    return metas, unresolved_count
+
+
+def _ordered_membership_items(memberships):
+    """Yield items from a list membership queryset."""
+    for membership in memberships.iterator():
+        yield membership.item
+
+
+def _smart_season_parent_items(user, source_list):
+    """Yield parent TV items for smart-list seasons, newest season release first."""
+    seen_item_ids = set()
+    seasons = (
+        Season.objects.filter(
+            user=user,
+            item__customlistitem__custom_list=source_list,
+            item__media_type=MediaTypes.SEASON.value,
+        )
+        .select_related("item", "related_tv__item")
+        .order_by(
+            F("item__release_datetime").desc(nulls_last=True),
+            "related_tv__item__title",
+            "related_tv__item_id",
+            "-item__customlistitem__id",
+        )
+    )
+    for season in seasons.iterator():
+        parent_item = season.related_tv.item
+        if parent_item.id in seen_item_ids:
+            continue
+        seen_item_ids.add(parent_item.id)
+        yield parent_item
+
+
 def project_catalog(user, spec, skip):
     """Return one page of publishable metas and the scanned unresolved count."""
     source_list = select_source_list(user, spec)
@@ -143,25 +201,17 @@ def project_catalog(user, spec, skip):
         .order_by("-date_added", "-id")
     )
 
-    metas = []
-    publishable_seen = 0
-    unresolved_count = 0
-    for membership in memberships.iterator():
-        item = membership.item
-        imdb_id = local_imdb_id(item)
-        if imdb_id is None:
-            unresolved_count += 1
-            continue
+    if memberships.exists() or not (
+        source_list.is_smart and spec.stremio_type == "series"
+    ):
+        return _project_item_metas(
+            _ordered_membership_items(memberships),
+            spec.stremio_type,
+            skip,
+        )
 
-        if publishable_seen < skip:
-            publishable_seen += 1
-            continue
-
-        meta = {"id": imdb_id, "type": spec.stremio_type, "name": item.title}
-        if item.image:
-            meta["poster"] = item.image
-        metas.append(meta)
-        if len(metas) == PAGE_SIZE:
-            break
-
-    return metas, unresolved_count
+    return _project_item_metas(
+        _smart_season_parent_items(user, source_list),
+        spec.stremio_type,
+        skip,
+    )
