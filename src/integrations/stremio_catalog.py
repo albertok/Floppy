@@ -164,26 +164,34 @@ def _ordered_membership_items(memberships):
 def _smart_season_parent_items(user, source_list):
     """Yield parent TV items for smart-list seasons, newest season release first."""
     seen_item_ids = set()
-    seasons = (
+    seasons = _smart_season_memberships(user, source_list).order_by(
+        F("item__release_datetime").desc(nulls_last=True),
+        "related_tv__item__title",
+        "related_tv__item_id",
+        "-item__customlistitem__id",
+    )
+    for season in seasons.iterator():
+        related_tv = season.related_tv
+        if related_tv is None:
+            continue
+        parent_item = related_tv.item
+        parent_item_id = parent_item.pk
+        if parent_item_id in seen_item_ids:
+            continue
+        seen_item_ids.add(parent_item_id)
+        yield parent_item
+
+
+def _smart_season_memberships(user, source_list):
+    """Return seasons that belong to the selected smart list."""
+    return (
         Season.objects.filter(
             user=user,
             item__customlistitem__custom_list=source_list,
             item__media_type=MediaTypes.SEASON.value,
         )
         .select_related("item", "related_tv__item")
-        .order_by(
-            F("item__release_datetime").desc(nulls_last=True),
-            "related_tv__item__title",
-            "related_tv__item_id",
-            "-item__customlistitem__id",
-        )
     )
-    for season in seasons.iterator():
-        parent_item = season.related_tv.item
-        if parent_item.id in seen_item_ids:
-            continue
-        seen_item_ids.add(parent_item.id)
-        yield parent_item
 
 
 def project_catalog(user, spec, skip):
@@ -200,6 +208,15 @@ def project_catalog(user, spec, skip):
         .select_related("item")
         .order_by("-date_added", "-id")
     )
+
+    if source_list.is_smart and spec.stremio_type == "series":
+        season_memberships = _smart_season_memberships(user, source_list)
+        if season_memberships.exists():
+            return _project_item_metas(
+                _smart_season_parent_items(user, source_list),
+                spec.stremio_type,
+                skip,
+            )
 
     if memberships.exists() or not (
         source_list.is_smart and spec.stremio_type == "series"

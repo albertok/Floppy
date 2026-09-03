@@ -433,6 +433,39 @@ class StremioAddonViewTests(TestCase):
             [newer_show.title, older_show.title],
         )
 
+    def test_series_catalog_prefers_smart_seasons_over_direct_tv_rows(self):
+        """Smart season catalogs are not taken over by stale direct TV rows."""
+        series = CustomList.objects.create(
+            name="Series",
+            owner=self.user,
+            is_smart=True,
+            smart_media_types=[MediaTypes.SEASON.value],
+        )
+        season_show, _ = self._add_series_with_season(
+            series,
+            1,
+            season_release_date=datetime.datetime(2026, 8, 20, tzinfo=datetime.UTC),
+        )
+        direct_tv = self._add_catalog_item(
+            series,
+            2,
+            media_type=MediaTypes.TV.value,
+            media_id="tt9999999",
+        )
+
+        response = self.client.get(
+            self._catalog_url(
+                media_type="series",
+                catalog_id="floppy-watchlist-series",
+            )
+        )
+
+        self.assertEqual(
+            [meta["id"] for meta in self._response_metas(response)],
+            [season_show.media_id],
+        )
+        self.assertNotEqual(season_show.media_id, direct_tv.media_id)
+
     def test_series_catalog_deduplicates_shows_by_newest_matching_season(self):
         """Multiple matching seasons produce one show at the newest season date."""
         series = CustomList.objects.create(
